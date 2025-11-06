@@ -91,26 +91,26 @@ class Rescuer(AbstAgent):
         # Registro global de socorristas (para round-robin de clusters)
         Rescuer.registry.append(self)
 
-    def receive_partial_map(self, explorer_name, part_map, part_victims):
-        """Chamado pelos exploradores: acumula peça de mapa e suas vítimas lidas."""
+    def recebe_mapa(self, explorer_name, part_map, part_victims):
+        """
+            o explorador entrega as info do mapa e vitimas que ele tem para os rescuers
+        """
         self._maps_parts.append(part_map)
         self._victs_parts.append(part_victims)
         self._finished_from += 1
 
         print(
-            f"RESCUER: recebeu mapa de {explorer_name} "
-            f"({len(part_map.map_data)} células, {len(part_victims)} vítimas)."
+            f" o socorrista recebeu mapa do  {explorer_name} "
+            f"as informacoes foram ({len(part_map.map_data)} células, e {len(part_victims)} vítimas)."
         )
 
-        # Só o mestre unifica quando todos terminaram
         if self.is_master and self._finished_from >= self.total_explorers:
             print(
-                "RESCUER (mestre): todos os exploradores finalizaram. Unificando mapas..."
+                "socorrista mestre vai juntar as informacoes..."
             )
             self._unify_maps_and_cluster()
 
-    # ------------------------------ Auxiliares internas ------------------------------
-
+#auxílio do gemini para debuggar
     def _load_pos2id(self) -> None:
         """Carrega mapeamento (x_abs, y_abs) -> id (linha do data.csv) a partir de env_victims.txt.
         O arquivo usa 'linha,coluna'; aqui padronizamos (x=col, y=lin)."""
@@ -127,10 +127,14 @@ class Rescuer(AbstAgent):
                 pos2id[(x, y)] = idx
         self._pos2id = pos2id
 
-    def _local_to_abs(self, x_local: int, y_local: int) -> Tuple[int, int]:
-        """Converte posição local do explorer para absoluta usando a BASE."""
-        bx, by = self._base_abs
-        return bx + int(x_local), by + int(y_local)
+    def converte_absoluto(self, x_local: int, y_local: int) -> Tuple[int, int]:
+        """
+        calcula as coordenadas locais do explorador para coordenadas absolutas do mapa, somando a posição da base.
+        """
+        base_x, base_y = self._base_abs
+        x_abs = base_x + int(x_local)
+        y_abs = base_y + int(y_local)
+        return x_abs, y_abs
 
     def _predict_sobr_e_tri(
         self, victim_ids: List[int]
@@ -187,9 +191,10 @@ class Rescuer(AbstAgent):
         total_lidas = len(self.victims)
         ok_abs = ok_swap = falhas = 0
 
+        #calcula a posicao relativas da vitimas em relacao a base
         for _, (pos_local, _vs) in self.victims.items():
             xl, yl = pos_local
-            xa, ya = self._local_to_abs(xl, yl)
+            xa, ya = self.converte_absoluto(xl, yl)
 
             # tentativa direta (x,y)
             if (xa, ya) in self._pos2id:

@@ -8,28 +8,31 @@ from rescuer import Rescuer
 
 def resumo_exploracao(rescuers):
     """
-    socorrista mestre recebe as informações e mostra os resultados obtidos pelos ageentes de exploração
+    mostra as informacoes da exploracao.
     """
-
     mestres = [r for r in rescuers if getattr(r, "is_master", False)]
     if not mestres:
-        print("socorrista mestre nao encontrado\n")
+        print("socorrista mestre nao encontrado.\n")
         return
 
     mestre = mestres[0]
-    vitimas_por_explorador = [len(v) for v in mestre._victs]
-    vitimas_unicas = {pos_vs[0] for v in mestre._victs for pos_vs in v.values()}
+    vitimas_por_explorador = [len(v) for v in mestre._victs_parts]
+
+    todas_vitimas = [v for parte in mestre._victs_parts for v in parte.values()]
+    vitimas_unicas = {pos_vs[0] for pos_vs in todas_vitimas}
     total_unicas = len(vitimas_unicas)
 
     soma_total = sum(vitimas_por_explorador)
     sobreposicao = ((soma_total / total_unicas) - 1) if total_unicas > 0 else 0.0
 
+
     ve1, ve2, ve3 = (vitimas_por_explorador + [0, 0, 0])[:3]
 
     print(
-        f" resultados: Ve1={ve1}   ,    Ve2={ve2}   , Ve3={ve3}  , "
-        f"  Ve={total_unicas}  , Sobreposição={sobreposicao:.3f}"
+        f"resultados: Ve1={ve1} , Ve2={ve2} , Ve3={ve3} , "
+        f"Ve={total_unicas} , sobreposicao={sobreposicao:.3f}"
     )
+
 
 
 def _run_env_once(vict_folder, env_folder, config_ag_folder):
@@ -69,7 +72,7 @@ def _run_env_once(vict_folder, env_folder, config_ag_folder):
         entrega mapa aos socorristas
         """
         for r in rescuers:
-            r.receive_partial_map(explorer_name, local_map, victims_dict)
+            r.recebe_mapa(explorer_name, local_map, victims_dict)
 
     for i in range(1, 4):
         explorer_file = os.path.join(config_ag_folder, f"explorer_{i}.txt")
