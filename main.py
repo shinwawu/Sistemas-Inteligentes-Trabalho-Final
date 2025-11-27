@@ -4,6 +4,9 @@ import os
 from vs.environment import Env
 from explorer import Explorer
 from rescuer import Rescuer
+import warnings
+
+warnings.filterwarnings("ignore")
 
 
 def resumo_exploracao(rescuers):
@@ -25,14 +28,12 @@ def resumo_exploracao(rescuers):
     soma_total = sum(vitimas_por_explorador)
     sobreposicao = ((soma_total / total_unicas) - 1) if total_unicas > 0 else 0.0
 
-
     ve1, ve2, ve3 = (vitimas_por_explorador + [0, 0, 0])[:3]
 
     print(
         f"resultados: Ve1={ve1} , Ve2={ve2} , Ve3={ve3} , "
         f"Ve={total_unicas} , sobreposicao={sobreposicao:.3f}"
     )
-
 
 
 def _run_env_once(vict_folder, env_folder, config_ag_folder):

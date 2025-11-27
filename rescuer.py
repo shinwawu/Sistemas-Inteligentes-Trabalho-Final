@@ -41,7 +41,7 @@ def carregar_base(path: str) -> Tuple[int, int]:
 
 
 ## Classe que define o Agente Rescuer com um plano fixo
-#A classe foi ajustada e debbugada com ajuda da LLM 
+# A classe foi ajustada e debbugada com ajuda da LLM
 class Rescuer(AbstAgent):
     """Recebe mapas/vítimas dos exploradores, unifica, prediz (sobr/tri),
     faz K-Means, grava cluster*.txt e gera imagem clusters_visual.png."""
@@ -92,7 +92,7 @@ class Rescuer(AbstAgent):
 
     def recebe_mapa(self, explorer_name, part_map, part_victims):
         """
-            o explorador entrega as info do mapa e vitimas que ele tem para os rescuers
+        o explorador entrega as info do mapa e vitimas que ele tem para os rescuers
         """
         self.pedaco_mapa.append(part_map)
         self._victs_parts.append(part_victims)
@@ -104,12 +104,10 @@ class Rescuer(AbstAgent):
         )
 
         if self.is_master and self.finalizado >= self.total_explorers:
-            print(
-                "socorrista mestre vai juntar as informacoes..."
-            )
+            print("socorrista mestre vai juntar as informacoes...")
             self.mapeamento_clusterizacao()
 
-    #auxílio do gemini para debuggar
+    # auxílio do gemini para debuggar
     def _load_pos2id(self) -> None:
         """Carrega mapeamento (x_abs, y_abs) -> id (linha do data.csv) a partir de env_victims.txt.
         O arquivo usa 'linha,coluna'; aqui padronizamos (x=col, y=lin)."""
@@ -135,17 +133,15 @@ class Rescuer(AbstAgent):
         y_abs = base_y + int(y_local)
         return x_abs, y_abs
 
-    def predict(
-        self, victim_ids: List[int]
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def predict(self, victim_ids: List[int]) -> Tuple[np.ndarray, np.ndarray]:
         """carrega os meus modelos salvos que estao em pkl e faz predict"""
         if not os.path.exists(self.modelo_sobr):
             raise FileNotFoundError("falta modelo_sobrevivencia.pkl")
         if not os.path.exists(self.modelo_tria):
             raise FileNotFoundError("falta modelo_triagem.pkl")
 
-        reg = joblib.load(self.modelo_sobr)  
-        clf = joblib.load(self.modelo_tria) 
+        reg = joblib.load(self.modelo_sobr)
+        clf = joblib.load(self.modelo_tria)
         df = pd.read_csv(self.data_csv)
 
         def montar_X(modelo):
@@ -156,7 +152,7 @@ class Rescuer(AbstAgent):
         tri = clf.predict(montar_X(clf)).astype(int)
         return sobr, tri
 
-#Funcao feita com auxilio do Gemini Pro, estava com dificuldade de mapear e debuggar, foi 
+    # Funcao feita com auxilio do Gemini Pro, estava com dificuldade de mapear e debuggar, foi
     def mapeamento_clusterizacao(self) -> None:
         """junta as informacoes, clusteriza, salva arquivos e imagem."""
         from map import Map
@@ -167,7 +163,6 @@ class Rescuer(AbstAgent):
             celulas_junt.update(mp.map_data)
         mapa_unico.map_data = celulas_junt
         self.map = mapa_unico
-
 
         vitimas_junt: Dict[int, Tuple[Tuple[int, int], list]] = {}
         for d in self._victs_parts:
@@ -207,10 +202,8 @@ class Rescuer(AbstAgent):
         if not pos_abs:
             print("nenhuma vítima mapeada")
             return
-        #até aqui foi feito com auxílio da LLM 
-        sobr, tri = self.predict(
-            victim_ids
-        )  
+        # até aqui foi feito com auxílio da LLM
+        sobr, tri = self.predict(victim_ids)
 
         xs = np.array([x for x, _ in pos_abs], dtype=float)
         ys = np.array([y for _, y in pos_abs], dtype=float)
@@ -220,8 +213,8 @@ class Rescuer(AbstAgent):
         y_norm = (ys - ys.min()) / y_den
 
         tri = np.asarray(tri, dtype=float)
-        tri_norm = tri / max(1.0, float(tri.max()))  
-        sobr = np.asarray(sobr, dtype=float)  
+        tri_norm = tri / max(1.0, float(tri.max()))
+        sobr = np.asarray(sobr, dtype=float)
 
         w_pos, w_sobr, w_tri = 1.0, 0.8, 0.6
         X = np.column_stack(
@@ -229,7 +222,9 @@ class Rescuer(AbstAgent):
         )
 
         k = 3
-        os.environ.setdefault("OMP_NUM_THREADS", "1")  #recomendacao do gemini para o erro de num threads
+        os.environ.setdefault(
+            "OMP_NUM_THREADS", "1"
+        )  # recomendacao do gemini para o erro de num threads
         kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
         rotulos = kmeans.fit_predict(X)
 
@@ -259,15 +254,13 @@ class Rescuer(AbstAgent):
         self.assignments = {name: [] for name in resc_names}
         for idx_lbl, lbl in enumerate(sorted(grupos.keys())):
             destino = resc_names[idx_lbl % len(resc_names)]
-            self.assignments[destino] += [
-                row[0] for row in grupos[lbl]
-            ] 
+            self.assignments[destino] += [row[0] for row in grupos[lbl]]
         print("socorrista mestre: atribuiu:")
         for kname, lst in self.assignments.items():
             print(f"  - {kname}: {sorted(lst)}")
 
         try:
-            #sugestao da visualizacao foi feita com auxilio do gemini
+            # sugestao da visualizacao foi feita com auxilio do gemini
             cmap = plt.cm.get_cmap("tab10", max(1, len(set(rotulos))))
             plt.figure(figsize=(9, 7))
             for i, r in enumerate(sorted(set(rotulos))):
@@ -293,9 +286,7 @@ class Rescuer(AbstAgent):
                 linewidths=1.5,
                 label=f"BASE ({bx},{by})",
             )
-            plt.title(
-                "kmeans usando sobr e posicao"
-            )
+            plt.title("kmeans")
             plt.xlabel("x (abs)")
             plt.ylabel("y (abs)")
             plt.grid(True, ls=":", alpha=0.6)
@@ -310,10 +301,10 @@ class Rescuer(AbstAgent):
         self.set_state(VS.IDLE)
 
     def deliberate(self) -> bool:
-        """ This is the choice of the next action. The simulator calls this
+        """This is the choice of the next action. The simulator calls this
         method at each reasonning cycle if the agent is ACTIVE.
         Must be implemented in every agent
         @return True: there's one or more actions to do
-        @return False: there's no more action to do 
+        @return False: there's no more action to do
         """
         return False
