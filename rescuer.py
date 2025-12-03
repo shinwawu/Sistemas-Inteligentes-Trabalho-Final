@@ -246,7 +246,7 @@ class Rescuer(AbstAgent):
         print("arquivos gerados".join(self.cluster_paths))
 
         # ============================
-        #  ATRIBUIÇÃO EQUILIBRADA DE CLUSTERS
+        #  ATRIBUIÇÃO POR DISTÂNCIA
         # ============================
 
         socorristas = Rescuer.registry
@@ -259,52 +259,36 @@ class Rescuer(AbstAgent):
         def distancia(a, b):
             return np.hypot(a[0] - b[0], a[1] - b[1])
 
-        # calcular centroide e gravidade de cada cluster
+        # calcular centroide de cada cluster
         cluster_inf = {}
         for lbl, lista in grupos.items():
             xs = [x for (_, x, y, s, t) in lista]
             ys = [y for (_, x, y, s, t) in lista]
             centro = (np.mean(xs), np.mean(ys))
+            cluster_inf[lbl] = centro
 
-            gravidades = [t for (_, x, y, s, t) in lista]
-            grav_media = float(np.mean(gravidades))
-
-            cluster_inf[lbl] = (centro, grav_media)
-
-        # ======== ATRIBUIÇÃO COM BALANCEAMENTO ========
-
-        peso_grav = 5.0  # influencia da gravidade
-        peso_balanceamento = 40.0  # força distribuição entre socorristas
-
+        # ======== ATRIBUIÇÃO 1-TO-1 POR DISTÂNCIA ========
         for lbl, lista in grupos.items():
 
-            centro, grav = cluster_inf[lbl]
+            centro = cluster_inf[lbl]
 
             melhor = None
-            melhor_score = float("inf")
+            melhor_dist = float("inf")
 
             for nome in nomes:
-
                 d = distancia(centro, pos_soc[nome])
-                carga = len(self.assignments[nome])
-
-                # distância + gravidade + penalização por carga
-                score = d + peso_grav * grav + peso_balanceamento * carga
-
-                if score < melhor_score:
-                    melhor_score = score
+                if d < melhor_dist:
+                    melhor_dist = d
                     melhor = nome
 
-            # atribui cluster ao socorrista escolhido
+            # atribui TODAS as vítimas do cluster ao socorrista escolhido
             self.assignments[melhor] += [row[0] for row in lista]
 
-        # print do resultado final
-        print("\nAtribuição equilibrada de clusters:")
+        # print do resultado
+        print("\nAtribuição por distância:")
         for nome, vitimas in self.assignments.items():
             print(f"  - {nome}: {len(vitimas)} vítimas")
 
-        # ----- visualização -----
-        # ----- visualização -----
         # ----- visualização -----
         try:
             # garante que xs, ys e rótulos são arrays 1D NumPy
