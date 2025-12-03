@@ -245,10 +245,7 @@ class Rescuer(AbstAgent):
             self.cluster_paths.append(path)
         print("arquivos gerados".join(self.cluster_paths))
 
-        # ============================
-        #  ATRIBUIÇÃO POR DISTÂNCIA
-        # ============================
-
+        # atribuição dos clusters aos socorristas por distância
         socorristas = Rescuer.registry
         nomes = [ag.NAME for ag in socorristas]
         self.assignments = {name: [] for name in nomes}
@@ -267,7 +264,6 @@ class Rescuer(AbstAgent):
             centro = (np.mean(xs), np.mean(ys))
             cluster_inf[lbl] = centro
 
-        # ======== ATRIBUIÇÃO 1-TO-1 POR DISTÂNCIA ========
         for lbl, lista in grupos.items():
 
             centro = cluster_inf[lbl]
@@ -281,7 +277,7 @@ class Rescuer(AbstAgent):
                     melhor_dist = d
                     melhor = nome
 
-            # atribui TODAS as vítimas do cluster ao socorrista escolhido
+            # atribui as vítimas do cluster ao socorrista escolhido
             self.assignments[melhor] += [row[0] for row in lista]
 
         # print do resultado
