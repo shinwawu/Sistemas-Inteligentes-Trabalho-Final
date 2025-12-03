@@ -205,8 +205,9 @@ class Rescuer(AbstAgent):
         # até aqui foi feito com auxílio da LLM
         sobr, tri = self.predict(victim_ids)
 
-        xs = np.array([x for x, _ in pos_abs], dtype=float)
-        ys = np.array([y for _, y in pos_abs], dtype=float)
+        xs = np.array([p[0] for p in pos_abs], dtype=float).ravel()
+        ys = np.array([p[1] for p in pos_abs], dtype=float).ravel()
+
         x_den = max(1.0, xs.max() - xs.min())
         y_den = max(1.0, ys.max() - ys.min())
         x_norm = (xs - xs.min()) / x_den
@@ -217,9 +218,7 @@ class Rescuer(AbstAgent):
         sobr = np.asarray(sobr, dtype=float)
 
         w_pos, w_sobr, w_tri = 1.0, 0.8, 0.6
-        X = np.column_stack(
-            [w_pos * x_norm, w_pos * y_norm, w_sobr * sobr, w_tri * tri_norm]
-        )
+        X = np.column_stack([x_norm, y_norm])
 
         k = 3
         os.environ.setdefault(
@@ -227,7 +226,7 @@ class Rescuer(AbstAgent):
         )  # recomendacao do gemini para o erro de num threads
         kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
         rotulos = kmeans.fit_predict(X)
-
+        rotulos = np.asarray(rotulos, dtype=int).ravel()
         grupos: Dict[int, List[Tuple[int, int, int, float, int]]] = {}
         for (x_abs, y_abs), vid, s, t, r in zip(
             pos_abs, victim_ids, sobr, tri.astype(int), rotulos
@@ -246,31 +245,99 @@ class Rescuer(AbstAgent):
             self.cluster_paths.append(path)
         print("arquivos gerados".join(self.cluster_paths))
 
-        resc_names = sorted([ag.NAME for ag in Rescuer.registry]) or [
-            "RESCUER_1",
-            "RESCUER_2",
-            "RESCUER_3",
-        ]
-        self.assignments = {name: [] for name in resc_names}
-        for idx_lbl, lbl in enumerate(sorted(grupos.keys())):
-            destino = resc_names[idx_lbl % len(resc_names)]
-            self.assignments[destino] += [row[0] for row in grupos[lbl]]
-        print("socorrista mestre: atribuiu:")
-        for kname, lst in self.assignments.items():
-            print(f"  - {kname}: {sorted(lst)}")
+        # ============================
+        #  ATRIBUIÇÃO EQUILIBRADA DE CLUSTERS
+        # ============================
 
+        socorristas = Rescuer.registry
+        nomes = [ag.NAME for ag in socorristas]
+        self.assignments = {name: [] for name in nomes}
+
+        # posição de cada socorrista
+        pos_soc = {ag.NAME: ag.base_pos_abs for ag in socorristas}
+
+        def distancia(a, b):
+            return np.hypot(a[0] - b[0], a[1] - b[1])
+
+        # calcular centroide e gravidade de cada cluster
+        cluster_inf = {}
+        for lbl, lista in grupos.items():
+            xs = [x for (_, x, y, s, t) in lista]
+            ys = [y for (_, x, y, s, t) in lista]
+            centro = (np.mean(xs), np.mean(ys))
+
+            gravidades = [t for (_, x, y, s, t) in lista]
+            grav_media = float(np.mean(gravidades))
+
+            cluster_inf[lbl] = (centro, grav_media)
+
+        # ======== ATRIBUIÇÃO COM BALANCEAMENTO ========
+
+        peso_grav = 5.0  # influencia da gravidade
+        peso_balanceamento = 40.0  # força distribuição entre socorristas
+
+        for lbl, lista in grupos.items():
+
+            centro, grav = cluster_inf[lbl]
+
+            melhor = None
+            melhor_score = float("inf")
+
+            for nome in nomes:
+
+                d = distancia(centro, pos_soc[nome])
+                carga = len(self.assignments[nome])
+
+                # distância + gravidade + penalização por carga
+                score = d + peso_grav * grav + peso_balanceamento * carga
+
+                if score < melhor_score:
+                    melhor_score = score
+                    melhor = nome
+
+            # atribui cluster ao socorrista escolhido
+            self.assignments[melhor] += [row[0] for row in lista]
+
+        # print do resultado final
+        print("\nAtribuição equilibrada de clusters:")
+        for nome, vitimas in self.assignments.items():
+            print(f"  - {nome}: {len(vitimas)} vítimas")
+
+        # ----- visualização -----
+        # ----- visualização -----
+        # ----- visualização -----
         try:
-            # sugestao da visualizacao foi feita com auxilio do gemini
-            cmap = plt.cm.get_cmap("tab10", max(1, len(set(rotulos))))
+            # garante que xs, ys e rótulos são arrays 1D NumPy
+            xs_plot = np.asarray(xs, dtype=float).ravel()
+            ys_plot = np.asarray(ys, dtype=float).ravel()
+            rotulos_plot = np.asarray(rotulos, dtype=int).ravel()
+
+            # força todos a terem o mesmo tamanho
+            n = min(xs_plot.size, ys_plot.size, rotulos_plot.size)
+            xs_plot = xs_plot[:n]
+            ys_plot = ys_plot[:n]
+            rotulos_plot = rotulos_plot[:n]
+
+            cmap = plt.cm.get_cmap("tab10", 10)
             plt.figure(figsize=(9, 7))
-            for i, r in enumerate(sorted(set(rotulos))):
-                idx = np.where(rotulos == r)[0]
+
+            for r in sorted(set(rotulos_plot)):
+                r_int = int(r)
+                idx = np.where(rotulos_plot == r_int)[0]
+
+                # filtra qualquer índice fora do tamanho válido (defensivo)
+                idx = idx[idx < xs_plot.size]
+
+                # evitar clusters vazios
+                if idx.size == 0:
+                    continue
+
                 plt.scatter(
-                    xs[idx],
-                    ys[idx],
+                    xs_plot[idx],
+                    ys_plot[idx],
                     s=24,
-                    c=[cmap(i)],
-                    label=f"cluster {r}",
+                    c=cmap(r_int % 10),
+                    label=f"cluster {r_int}",
                     alpha=0.9,
                     edgecolors="none",
                 )
@@ -286,6 +353,7 @@ class Rescuer(AbstAgent):
                 linewidths=1.5,
                 label=f"BASE ({bx},{by})",
             )
+
             plt.title("kmeans")
             plt.xlabel("x (abs)")
             plt.ylabel("y (abs)")
@@ -295,16 +363,11 @@ class Rescuer(AbstAgent):
             plt.savefig("clusters_visual.png", dpi=140)
             plt.close()
             print("clusterizacao salva visual")
+
         except Exception as e:
             print("falha no salvamento visual", e)
 
-        self.set_state(VS.IDLE)
+    # ------------------------------------------------------------------
 
     def deliberate(self) -> bool:
-        """This is the choice of the next action. The simulator calls this
-        method at each reasonning cycle if the agent is ACTIVE.
-        Must be implemented in every agent
-        @return True: there's one or more actions to do
-        @return False: there's no more action to do
-        """
         return False
