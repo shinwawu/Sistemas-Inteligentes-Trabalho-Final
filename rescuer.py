@@ -113,6 +113,13 @@ class Rescuer(AbstAgent):
         # Registro global de socorristas (para round-robin de clusters)
         Rescuer.registry.append(self)
 
+        self.x, self.y = self.base_pos_abs
+        
+        self.plan = []  
+        self.my_victims = []
+        self.victim_locs = {} 
+        self.current_goal = None
+
 
         ##   ----  criei essas variáveis a mais, mas ainda não terminei  ----
   
@@ -120,9 +127,6 @@ class Rescuer(AbstAgent):
         self.margem_seguranca = 1.575  # margem de seguranca
 
         self.walk_stack = Stack() 
-
-        self.x = 0
-        self.y = 0
         self.current_index = 1
 
         self.flag = True
@@ -169,9 +173,9 @@ class Rescuer(AbstAgent):
         """
         calcula as coordenadas locais do explorador para coordenadas absolutas do mapa, somando a posição da base.
         """
-        base_x, base_y = self.base_pos_abs
-        x_abs = base_x + int(x_local)
-        y_abs = base_y + int(y_local)
+        bx, by = self.base_pos_abs
+        x_abs = bx + int(x_local)
+        y_abs = by + int(y_local)
         return x_abs, y_abs
 
     def predict(self, victim_ids: List[int]) -> Tuple[np.ndarray, np.ndarray]:
@@ -193,17 +197,99 @@ class Rescuer(AbstAgent):
         tri = clf.predict(montar_X(clf)).astype(int)
         return sobr, tri
 
+    def calcular_custo_sequencia(self, sequencia):
+        """Calcula a distância total de uma sequência de vítimas"""
+        custo_total = 0
+        atual_pos = (self.x, self.y) # Começa onde o agente está (Base)
+        
+        for vid in sequencia:
+            dest_pos = self.victim_locs[vid]
+            # Usa heurística (distância direta) para ser rápido. 
+            # Rodar A* aqui deixaria o AG muito lento.
+            dist = self.heuristic(atual_pos, dest_pos)
+            custo_total += dist
+            atual_pos = dest_pos
+            
+        # Adiciona custo de volta à base
+        custo_total += self.heuristic(atual_pos, self.base_pos_abs)
+        return custo_total
+
+    def executar_ag(self):
+        """Otimiza a ordem de self.my_victims"""
+        if len(self.my_victims) < 2:
+            return # Não precisa ordenar se tiver 0 ou 1 vítima
+
+        populacao_tam = 20
+        geracoes = 50
+        populacao = []
+
+        # 1. Cria população inicial (permutações aleatórias)
+        for _ in range(populacao_tam):
+            individuo = self.my_victims[:]
+            random.shuffle(individuo)
+            populacao.append(individuo)
+
+        for g in range(geracoes):
+            # Ordena por aptidão (menor custo é melhor)
+            populacao.sort(key=lambda x: self.calcular_custo_sequencia(x))
+            melhores = populacao[:populacao_tam//2] # Seleciona os 50% melhores
+            
+            nova_populacao = melhores[:]
+            
+            # Crossover e Mutação para preencher o resto
+            while len(nova_populacao) < populacao_tam:
+                # Torneio simples
+                pai1 = random.choice(melhores)
+                pai2 = random.choice(melhores)
+                
+                # Crossover (Order Crossover - OX1 simplificado)
+                corte = random.randint(0, len(pai1)-1)
+                filho = pai1[:corte] + [x for x in pai2 if x not in pai1[:corte]]
+                
+                # Mutação (Troca dois genes)
+                if random.random() < 0.2: # 20% de chance
+                    i1, i2 = random.sample(range(len(filho)), 2)
+                    filho[i1], filho[i2] = filho[i2], filho[i1]
+                
+                nova_populacao.append(filho)
+            
+            populacao = nova_populacao
+
+        # Pega o melhor da última geração
+        populacao.sort(key=lambda x: self.calcular_custo_sequencia(x))
+        melhor_sequencia = populacao[0]
+        
+        print(f"{self.NAME}: Sequência otimizada pelo AG: {melhor_sequencia}")
+        self.my_victims = melhor_sequencia
+
+
     # Funcao feita com auxilio do Gemini Pro, estava com dificuldade de mapear e debuggar, foi
     def mapeamento_clusterizacao(self) -> None:
         """junta as informacoes, clusteriza, salva arquivos e imagem."""
         from map import Map
 
+        # --- CORREÇÃO: Converter Mapa para Absoluto ---
         mapa_unico = Map()
         celulas_junt = {}
+        
+        bx, by = self.base_pos_abs # Pega a posição da base (ex: 46, 46)
+
         for mp in self.pedaco_mapa:
-            celulas_junt.update(mp.map_data)
+            # mp.map_data tem chaves relativas (0,0), (1,0)...
+            for (rx, ry), dados_celula in mp.map_data.items():
+                # Converte para absoluto somando a base
+                ax = rx + bx
+                ay = ry + by
+                
+                # Salva no dicionário unificado com a chave absoluta
+                celulas_junt[(ax, ay)] = dados_celula
+
+        if (bx, by) not in celulas_junt:
+            celulas_junt[(bx, by)] = (1.0, VS.NO_VICTIM, [VS.CLEAR]*8)
+
         mapa_unico.map_data = celulas_junt
         self.map = mapa_unico
+        # ---------------------------------------------
 
         vitimas_junt: Dict[int, Tuple[Tuple[int, int], list]] = {}
         for d in self._victs_parts:
@@ -339,10 +425,52 @@ class Rescuer(AbstAgent):
         except Exception as e:
             print("falha no salvamento visual", e)
 
-        self.set_state(VS.ACTIVE)
+        lookup_locs = {}
+        for r, lista_vits in grupos.items():
+            for v in lista_vits:
+                vid, vx, vy = int(v[0]), int(v[1]), int(v[2])
+                lookup_locs[vid] = (vx, vy)
+
+        print("Mestre: Distribuindo dados e ativando socorristas...")
+        for agente in Rescuer.registry:
+            # Todos recebem o mapa corrigido e a localização das vítimas
+            agente.map = mapa_unico
+            agente.victim_locs = lookup_locs
+            
+            # Cada um pega sua lista de tarefas (assignments)
+            if agente.NAME in self.assignments:
+                agente.my_victims = self.assignments[agente.NAME]
+            
+            # ACORDA O AGENTE
+            agente.set_state(VS.ACTIVE)
 
 
-        # self.go_save_victims(mapa_unificado, vitimas_unificadas)
+        # 1. Criar um dicionário mestre de ID -> Coordenada para facilitar a busca
+        # 'grupos' é: {label: [(vid, x, y, sobr, tri), ...]}
+        lookup_locs = {}
+        for lbl, lista_vitimas in grupos.items():
+            for v_data in lista_vitimas:
+                # v_data = (vid, x, y, sobr, tri)
+                vid = int(v_data[0])
+                coords = (int(v_data[1]), int(v_data[2]))
+                lookup_locs[vid] = coords
+
+        # 2. Distribuir a informação para TODOS os socorristas registrados
+        print(f"Mestre {self.NAME}: Distribuindo mapas e tarefas...")
+        for agente in Rescuer.registry:
+            # Todos recebem o mapa unificado completo
+            agente.map = mapa_unico 
+            
+            # Todos recebem o dicionário de localizações
+            agente.victim_locs = lookup_locs 
+            
+            # Cada um recebe SUA lista específica de vítimas
+            if agente.NAME in self.assignments:
+                agente.my_victims = self.assignments[agente.NAME]
+                print(f"  -> {agente.NAME} recebeu {len(agente.my_victims)} vitimas.")
+            
+            # Mudamos o estado de todos para ACTIVE para começarem a andar
+            agente.set_state(VS.ACTIVE)
     
     def calcula_custo(self, bx, by):
         """
@@ -496,51 +624,145 @@ class Rescuer(AbstAgent):
         custo_necessario = custo_volta * self.margem_seguranca
 
         return temp_rest >= custo_necessario
+    
+
+    def heuristic(self, a, b):
+        """Distância Manhattan ou Diagonal"""
+        dx = abs(a[0] - b[0])
+        dy = abs(a[1] - b[1])
+        return 1.5 * min(dx, dy) + 1.0 * abs(dx - dy)
+
+    def aestrela(self, start, goal):
+        if not self.map.in_map(start) or not self.map.in_map(goal):
+            return []
+
+        frontier = PriorityQueue()
+        frontier.put((0, start))
+        came_from = {start: None}
+        cost_so_far = {start: 0}
+
+        while not frontier.empty():
+            _, current = frontier.get()
+
+            if current == goal:
+                break
+
+            cell_data = self.map.get(current)
+            if not cell_data: continue
+            walls = cell_data[2] # Vetor de vizinhos
+
+            # Itera vizinhos (0 a 7)
+            for i, (dx, dy) in enumerate(AbstAgent.AC_INCR.values()):
+                # Se for passável (CLEAR, NO_VICTIM ou Vítima identificada)
+                if walls[i] != VS.WALL and walls[i] != VS.END:
+                    next_node = (current[0] + dx, current[1] + dy)
+                    
+                    # Custo do movimento (1.5 diagonal, 1.0 reto)
+                    move_cost = self.COST_DIAG if dx!=0 and dy!=0 else self.COST_LINE
+                    
+                    # Custo do terreno
+                    n_data = self.map.get(next_node)
+                    if n_data: move_cost *= n_data[0]
+
+                    new_cost = cost_so_far[current] + move_cost
+                    if next_node not in cost_so_far or new_cost < cost_so_far[next_node]:
+                        cost_so_far[next_node] = new_cost
+                        priority = new_cost + self.heuristic(next_node, goal)
+                        frontier.put((priority, next_node))
+                        came_from[next_node] = current
+
+        if goal not in came_from: return []
+        
+        path = []
+        curr = goal
+        while curr != start:
+            path.append(curr)
+            curr = came_from[curr]
+        path.reverse()
+        return path
 
     def deliberate(self) -> bool:
-        # print('\n\n <<<<<  I N I C I A N D O   S O C O R R I S T A S >>>>> \n\n')
-        # Se ainda há fronteira e pode explorar -> explorar
-        # self.aestrela()
-        # return False
-        if self.flag and self.continuar_explorando():
-            # print(f'{self.NAME}antes:: ', self.get_rtime())
-            resp = self.go_save_victms()
-            if resp is None:
-                self.flag = False
-
-            # print(f'{self.NAME}depois:: ', self.get_rtime())
-            return True
-
-        print(f'SOCORRISTA {self.NAME} voltando para a base')
-
-        ##   ----     Essa lógica copiei tbm, mas ainda não terminei, pq não consegui 
-        # entender direito como que usa o 'frontier'    ----
-        if (self.x, self.y) != (0, 0):
+        """Chamado a cada ciclo. Controla a execução."""
         
-            self.come_back()
+        # 0. Executa o AG uma única vez para ordenar a lista
+        if not hasattr(self, 'ag_executado'):
+            self.executar_ag()
+            self.ag_executado = True
+
+        # 1. Planejamento (Se não tenho rota pronta)
+        if not self.plan:
+            if self.current_goal is None:
+                # Tenta pegar próxima vítima da lista
+                while self.my_victims:
+                    vid = self.my_victims[0] # Espia o primeiro, não remove ainda
+                    loc = self.victim_locs.get(vid)
+                    
+                    if not loc:
+                        self.my_victims.pop(0) # Remove se não tem local
+                        continue
+
+                    # --- CHECAGEM DE BATERIA ---
+                    # 1. Custo para ir até a vítima (estimado ou real via A*)
+                    rota_ida = self.aestrela((self.x, self.y), loc)
+                    if not rota_ida:
+                        print(f"{self.NAME}: Sem caminho para vítima {vid}. Pulando.")
+                        self.my_victims.pop(0)
+                        continue
+                    
+                    custo_ida = len(rota_ida) * self.COST_DIAG # Estimativa pessimista (tudo diagonal)
+                    
+                    # 2. Custo para voltar da vítima até a base
+                    # Usamos heurística aqui para não rodar dois A* pesados, 
+                    # mas multiplicamos por margem de segurança
+                    custo_volta = self.heuristic(loc, self.base_pos_abs)
+                    
+                    custo_total = (custo_ida + custo_volta) * 1.5 # Margem de segurança de 50%
+                    
+                    if self.get_rtime() < custo_total:
+                        print(f"{self.NAME}: Bateria insuficiente para ir à vítima {vid} e voltar. Abortando missão.")
+                        self.my_victims = [] # Limpa lista para forçar retorno
+                        break # Sai do loop para acionar retorno à base
+                    
+                    # Se passou na checagem, define como objetivo
+                    self.my_victims.pop(0) # Remove da lista oficial
+                    self.current_goal = loc
+                    self.plan = rota_ida # Já calculamos, aproveita
+                    print(f"{self.NAME}: Indo salvar vítima {vid}. Bateria OK.")
+                    break
+                
+                # Se saiu do loop e não definiu current_goal, volta pra base
+                if self.current_goal is None:
+                    if (self.x, self.y) != self.base_pos_abs:
+                        self.current_goal = self.base_pos_abs
+                        print(f"{self.NAME}: Voltando para base.")
+                        self.plan = self.aestrela((self.x, self.y), self.base_pos_abs)
+                        if not self.plan:
+                            # Se falhar o A* pra base, tenta ir vizinho a vizinho pela heuristica (desespero)
+                            print(f"{self.NAME}: A* falhou para base. Tentando movimento manual.")
+                            # ... (lógica de emergência opcional)
+                    else:
+                        print(f"{self.NAME}: Fim da execução.")
+                        return False
+
+        # 2. Execução
+        if self.plan:
+            prox = self.plan.pop(0)
+            dx = prox[0] - self.x
+            dy = prox[1] - self.y
             
-            return True
+            res = self.walk(dx, dy)
+            
+            if res == VS.BUMPED:
+                print(f"{self.NAME}: Colisão! Recalculando.")
+                self.plan = []
+            elif res == VS.EXECUTED:
+                self.x += dx
+                self.y += dy
+            
+            if (self.x, self.y) == self.current_goal:
+                if self.current_goal != self.base_pos_abs:
+                    print(f"{self.NAME}: Salvando vítima...")
+                    self.first_aid()
+                self.current_goal = None
 
-        print(f'{self.NAME} FINISHED')
-        return False
-
-
-    def h_score(self, destino):
-        """Calcula o h_score faltante"""
-        # self.calcula_custo()
-        linha = destino[0]
-        coluna = destino[1]
-
-        return abs(self.x - coluna) + abs(self.y - linha)
-
-    def aestrela(self):
-        print(self.map)
-        print(self.map.__dict__)
-        # f_score = {celula: float("inf") for celula in self.map[0].map_data.keys()}
-        # print(f_score)
-        # time.sleep()
-        # caminho = ""
-        # return caminho
-
-        pass
-
+        return True
