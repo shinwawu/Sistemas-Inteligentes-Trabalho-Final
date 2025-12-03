@@ -154,19 +154,22 @@ class Rescuer(AbstAgent):
 
     # auxílio do gemini para debuggar
     def _load_pos2id(self) -> None:
-        """Carrega mapeamento (x_abs, y_abs) -> id (linha do data.csv) a partir de env_victims.txt.
-        O arquivo usa 'linha,coluna'; aqui padronizamos (x=col, y=lin)."""
         if self._pos2id is not None:
             return
+            
         pos2id: Dict[Tuple[int, int], int] = {}
+        
+        # Lê o arquivo diretamente como X, Y
         with open(self.env_victims_path, "r", newline="") as f:
             for idx, line in enumerate(f):
                 s = line.strip()
                 if not s:
                     continue
-                lin, col = map(int, s.split(","))  # arquivo: linha,coluna
-                x, y = col, lin  # nosso padrão: x=coluna, y=linha
+                # PDF: "x a coluna e y a linha"
+                x_str, y_str = s.split(",")
+                x, y = int(x_str), int(y_str)
                 pos2id[(x, y)] = idx
+                
         self._pos2id = pos2id
 
     def converte_absoluto(self, x_local: int, y_local: int) -> Tuple[int, int]:
@@ -215,261 +218,178 @@ class Rescuer(AbstAgent):
         return custo_total
 
     def executar_ag(self):
-        """Otimiza a ordem de self.my_victims"""
+        """AG para ordenar my_victims maximizando o fitness."""
         if len(self.my_victims) < 2:
-            return # Não precisa ordenar se tiver 0 ou 1 vítima
+            return
 
-        populacao_tam = 20
-        geracoes = 50
-        populacao = []
-
-        # 1. Cria população inicial (permutações aleatórias)
-        for _ in range(populacao_tam):
-            individuo = self.my_victims[:]
-            random.shuffle(individuo)
-            populacao.append(individuo)
-
-        for g in range(geracoes):
-            # Ordena por aptidão (menor custo é melhor)
-            populacao.sort(key=lambda x: self.calcular_custo_sequencia(x))
-            melhores = populacao[:populacao_tam//2] # Seleciona os 50% melhores
-            
-            nova_populacao = melhores[:]
-            
-            # Crossover e Mutação para preencher o resto
-            while len(nova_populacao) < populacao_tam:
-                # Torneio simples
-                pai1 = random.choice(melhores)
-                pai2 = random.choice(melhores)
-                
-                # Crossover (Order Crossover - OX1 simplificado)
-                corte = random.randint(0, len(pai1)-1)
-                filho = pai1[:corte] + [x for x in pai2 if x not in pai1[:corte]]
-                
-                # Mutação (Troca dois genes)
-                if random.random() < 0.2: # 20% de chance
-                    i1, i2 = random.sample(range(len(filho)), 2)
-                    filho[i1], filho[i2] = filho[i2], filho[i1]
-                
-                nova_populacao.append(filho)
-            
-            populacao = nova_populacao
-
-        # Pega o melhor da última geração
-        populacao.sort(key=lambda x: self.calcular_custo_sequencia(x))
-        melhor_sequencia = populacao[0]
+        pop_size = 20
+        generations = 30
         
-        print(f"{self.NAME}: Sequência otimizada pelo AG: {melhor_sequencia}")
-        self.my_victims = melhor_sequencia
+        # População Inicial
+        pop = [self.my_victims[:]] # Inclui a original
+        for _ in range(pop_size - 1):
+            ind = self.my_victims[:]
+            random.shuffle(ind)
+            pop.append(ind)
+            
+        for g in range(generations):
+            # Ordena pelo Fitness (Decrescente)
+            pop.sort(key=self.calcular_fitness, reverse=True)
+            
+            next_gen = pop[:pop_size//2] # Elitismo
+            
+            while len(next_gen) < pop_size:
+                p1 = random.choice(next_gen)
+                p2 = random.choice(next_gen)
+                
+                # Crossover
+                cut = random.randint(0, len(p1)-1)
+                child = p1[:cut] + [x for x in p2 if x not in p1[:cut]]
+                
+                # Mutação
+                if random.random() < 0.2:
+                    i1, i2 = random.sample(range(len(child)), 2)
+                    child[i1], child[i2] = child[i2], child[i1]
+                
+                next_gen.append(child)
+            pop = next_gen
+            
+        pop.sort(key=self.calcular_fitness, reverse=True)
+        self.my_victims = pop[0]
+        print(f"{self.NAME}: Rota otimizada. Fitness={self.calcular_fitness(self.my_victims):.1f}")
 
 
     # Funcao feita com auxilio do Gemini Pro, estava com dificuldade de mapear e debuggar, foi
     def mapeamento_clusterizacao(self) -> None:
-        """junta as informacoes, clusteriza, salva arquivos e imagem."""
+        """Une mapas, identifica vítimas (agora sem erros de ID) e clusteriza."""
         from map import Map
 
-        # --- CORREÇÃO: Converter Mapa para Absoluto ---
+        # 1. Unifica o Mapa
         mapa_unico = Map()
         celulas_junt = {}
-        
-        bx, by = self.base_pos_abs # Pega a posição da base (ex: 46, 46)
+        bx, by = self.base_pos_abs 
 
         for mp in self.pedaco_mapa:
-            # mp.map_data tem chaves relativas (0,0), (1,0)...
             for (rx, ry), dados_celula in mp.map_data.items():
-                # Converte para absoluto somando a base
-                ax = rx + bx
-                ay = ry + by
-                
-                # Salva no dicionário unificado com a chave absoluta
+                ax, ay = rx + bx, ry + by
                 celulas_junt[(ax, ay)] = dados_celula
 
+        # Garante a base como livre
         if (bx, by) not in celulas_junt:
             celulas_junt[(bx, by)] = (1.0, VS.NO_VICTIM, [VS.CLEAR]*8)
 
         mapa_unico.map_data = celulas_junt
         self.map = mapa_unico
-        # ---------------------------------------------
 
-        vitimas_junt: Dict[int, Tuple[Tuple[int, int], list]] = {}
+        # 2. Processa Vítimas
+        vitimas_junt = {}
         for d in self._victs_parts:
             vitimas_junt.update(d)
         self.victims = vitimas_junt
 
         self._load_pos2id()
-        pos_abs: List[Tuple[int, int]] = []
-        victim_ids: List[int] = []
-        total_lidas = len(self.victims)
-        ok_abs = ok_swap = falhas = 0
+        pos_abs = []
+        victim_ids = []
 
-        for _, (pos_local, _vs) in self.victims.items():
+        for _, (pos_local, _) in self.victims.items():
             xl, yl = pos_local
             xa, ya = self.converte_absoluto(xl, yl)
 
+            # Validação de Segurança: O local é caminhável?
+            # Se o explorador marcou como PAREDE (dificuldade alta), tentamos vizinho
+            if (xa, ya) in celulas_junt and celulas_junt[(xa, ya)][0] > 50.0:
+                # Procura vizinho livre
+                found_better = False
+                for dx, dy in [(0,1), (0,-1), (1,0), (-1,0)]:
+                    tx, ty = xa+dx, ya+dy
+                    if (tx, ty) in celulas_junt and celulas_junt[(tx, ty)][0] < 50.0:
+                        xa, ya = tx, ty # Ajusta o alvo para o vizinho livre
+                        found_better = True
+                        break
+                if not found_better:
+                    print(f"AVISO: Vítima em ({xa},{ya}) parece estar numa parede.")
+
+            # Busca o ID exato (agora que corrigimos _load_pos2id, deve bater)
             if (xa, ya) in self._pos2id:
-                pos_abs.append((xa, ya))
-                victim_ids.append(self._pos2id[(xa, ya)])
-                ok_abs += 1
-                continue
-
-            if (ya, xa) in self._pos2id:
-                pos_abs.append((ya, xa))
-                victim_ids.append(self._pos2id[(ya, xa)])
-                ok_swap += 1
-                continue
-
-            falhas += 1
-
-        self.resumo_mapeamento = (
-            f"vitimas lidas -> ids: tot={total_lidas}, "
-            f"ok_abs={ok_abs}, ok_swap={ok_swap}, falhas={falhas}"
-        )
-        print(self.resumo_mapeamento)
+                vid = self._pos2id[(xa, ya)]
+            else:
+                # Caso extremo de desalinhamento (ex: vítima em parede no arquivo)
+                # Tentamos raio 1 apenas para casar o ID
+                vid = -999
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
+                        if (xa+dx, ya+dy) in self._pos2id:
+                            vid = self._pos2id[(xa+dx, ya+dy)]
+                            break
+                    if vid != -999: break
+            
+            pos_abs.append((xa, ya))
+            victim_ids.append(vid)
 
         if not pos_abs:
-            print("nenhuma vítima mapeada")
+            print("Nenhuma vítima mapeada.")
             return
-        # até aqui foi feito com auxílio da LLM
-        sobr, tri = self.predict(victim_ids)
 
+        # 3. Predição e Clusterização
+        # Remove IDs inválidos para a predição, mas mantém na lista
+        ids_validos = [v if v >= 0 else 0 for v in victim_ids]
+        sobr, tri = self.predict(ids_validos)
+
+        # Se for -999, atribui prioridade média
+        for i, v in enumerate(victim_ids):
+            if v < 0:
+                sobr[i] = 0.5
+                tri[i] = 2
+
+        # K-Means Espacial
         xs = np.array([x for x, _ in pos_abs], dtype=float)
         ys = np.array([y for _, y in pos_abs], dtype=float)
-        x_den = max(1.0, xs.max() - xs.min())
-        y_den = max(1.0, ys.max() - ys.min())
-        x_norm = (xs - xs.min()) / x_den
-        y_norm = (ys - ys.min()) / y_den
+        
+        # Normaliza para K-Means
+        den_x = max(1.0, xs.max() - xs.min())
+        den_y = max(1.0, ys.max() - ys.min())
+        X = np.column_stack([(xs - xs.min())/den_x, (ys - ys.min())/den_y])
 
-        tri = np.asarray(tri, dtype=float)
-        tri_norm = tri / max(1.0, float(tri.max()))
-        sobr = np.asarray(sobr, dtype=float)
-
-        w_pos, w_sobr, w_tri = 1.0, 0.8, 0.6
-        X = np.column_stack(
-            [w_pos * x_norm, w_pos * y_norm, w_sobr * sobr, w_tri * tri_norm]
-        )
-
-        k = 3
-        os.environ.setdefault(
-            "OMP_NUM_THREADS", "1"
-        )  # recomendacao do gemini para o erro de num threads
+        k = min(3, len(pos_abs))
+        os.environ["OMP_NUM_THREADS"] = "1"
         kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
         rotulos = kmeans.fit_predict(X)
 
-        grupos: Dict[int, List[Tuple[int, int, int, float, int]]] = {}
-        for (x_abs, y_abs), vid, s, t, r in zip(
-            pos_abs, victim_ids, sobr, tri.astype(int), rotulos
-        ):
-            grupos.setdefault(int(r), []).append(
-                (int(vid), int(x_abs), int(y_abs), float(s), int(t))
-            )
+        grupos = {}
+        for (x, y), vid, s, t, r in zip(pos_abs, victim_ids, sobr, tri, rotulos):
+            grupos.setdefault(int(r), []).append((int(vid), int(x), int(y), float(s), int(t)))
 
-        self.cluster_paths = []
-        for i, r in enumerate(sorted(grupos.keys()), start=1):
-            path = f"cluster{i}.txt"
-            with open(path, "w", newline="") as f:
-                w = csv.writer(f)
-                for row in grupos[r]:
-                    w.writerow(row)
-            self.cluster_paths.append(path)
-        print("arquivos gerados".join(self.cluster_paths))
-
-        resc_names = sorted([ag.NAME for ag in Rescuer.registry]) or [
-            "RESCUER_1",
-            "RESCUER_2",
-            "RESCUER_3",
-        ]
+        # 4. Distribuição
+        resc_names = sorted([ag.NAME for ag in Rescuer.registry])
         self.assignments = {name: [] for name in resc_names}
-        for idx_lbl, lbl in enumerate(sorted(grupos.keys())):
-            destino = resc_names[idx_lbl % len(resc_names)]
-            self.assignments[destino] += [row[0] for row in grupos[lbl]]
-        print("socorrista mestre: atribuiu:")
-        for kname, lst in self.assignments.items():
-            print(f"  - {kname}: {sorted(lst)}")
-
-        try:
-            # sugestao da visualizacao foi feita com auxilio do gemini
-            cmap = plt.cm.get_cmap("tab10", max(1, len(set(rotulos))))
-            plt.figure(figsize=(9, 7))
-            for i, r in enumerate(sorted(set(rotulos))):
-                idx = np.where(rotulos == r)[0]
-                plt.scatter(
-                    xs[idx],
-                    ys[idx],
-                    s=24,
-                    c=[cmap(i)],
-                    label=f"cluster {r}",
-                    alpha=0.9,
-                    edgecolors="none",
-                )
-
-            bx, by = self.base_pos_abs
-            plt.scatter(
-                [bx],
-                [by],
-                s=120,
-                marker="*",
-                facecolors="none",
-                edgecolors="k",
-                linewidths=1.5,
-                label=f"BASE ({bx},{by})",
-            )
-            plt.title("kmeans")
-            plt.xlabel("x (abs)")
-            plt.ylabel("y (abs)")
-            plt.grid(True, ls=":", alpha=0.6)
-            plt.legend(loc="best", fontsize=9)
-            plt.tight_layout()
-            plt.savefig("clusters_visual.png", dpi=140)
-            plt.close()
-            print("clusterizacao salva visual")
-        except Exception as e:
-            print("falha no salvamento visual", e)
-
+        
         lookup_locs = {}
-        for r, lista_vits in grupos.items():
-            for v in lista_vits:
-                vid, vx, vy = int(v[0]), int(v[1]), int(v[2])
-                lookup_locs[vid] = (vx, vy)
+        lookup_props = {} # Para o fitness do AG
 
-        print("Mestre: Distribuindo dados e ativando socorristas...")
+        cluster_keys = sorted(grupos.keys())
+        for i, c_key in enumerate(cluster_keys):
+            agente = resc_names[i % len(resc_names)]
+            for v_data in grupos[c_key]:
+                vid, vx, vy, vs, vt = v_data
+                
+                # Se ID duplicado ou inválido, gera temp único para não sobrescrever no dict
+                if vid < 0 or vid in lookup_locs:
+                    vid = -1000 - len(lookup_locs) 
+                
+                lookup_locs[vid] = (vx, vy)
+                lookup_props[vid] = (vs, vt)
+                self.assignments[agente].append(vid)
+
+        print(f"Mestre: Mapa e {len(pos_abs)} vítimas distribuídas.")
+
         for agente in Rescuer.registry:
-            # Todos recebem o mapa corrigido e a localização das vítimas
             agente.map = mapa_unico
             agente.victim_locs = lookup_locs
+            agente.victim_props = lookup_props # Passa propriedades para o AG
             
-            # Cada um pega sua lista de tarefas (assignments)
             if agente.NAME in self.assignments:
                 agente.my_victims = self.assignments[agente.NAME]
             
-            # ACORDA O AGENTE
-            agente.set_state(VS.ACTIVE)
-
-
-        # 1. Criar um dicionário mestre de ID -> Coordenada para facilitar a busca
-        # 'grupos' é: {label: [(vid, x, y, sobr, tri), ...]}
-        lookup_locs = {}
-        for lbl, lista_vitimas in grupos.items():
-            for v_data in lista_vitimas:
-                # v_data = (vid, x, y, sobr, tri)
-                vid = int(v_data[0])
-                coords = (int(v_data[1]), int(v_data[2]))
-                lookup_locs[vid] = coords
-
-        # 2. Distribuir a informação para TODOS os socorristas registrados
-        print(f"Mestre {self.NAME}: Distribuindo mapas e tarefas...")
-        for agente in Rescuer.registry:
-            # Todos recebem o mapa unificado completo
-            agente.map = mapa_unico 
-            
-            # Todos recebem o dicionário de localizações
-            agente.victim_locs = lookup_locs 
-            
-            # Cada um recebe SUA lista específica de vítimas
-            if agente.NAME in self.assignments:
-                agente.my_victims = self.assignments[agente.NAME]
-                print(f"  -> {agente.NAME} recebeu {len(agente.my_victims)} vitimas.")
-            
-            # Mudamos o estado de todos para ACTIVE para começarem a andar
             agente.set_state(VS.ACTIVE)
     
     def calcula_custo(self, bx, by):
@@ -495,6 +415,54 @@ class Rescuer(AbstAgent):
 
         # custo total mínimo
         return diag * self.COST_DIAG + linha * self.COST_LINE
+    
+    def calcular_fitness(self, sequencia):
+        """
+        Fitness = (10 * Soma(Pontos/Prioridade)) - (b * Custo_Bateria)
+        Considera apenas vítimas alcançáveis antes da bateria acabar.
+        """
+        if not sequencia: return 0.0
+        
+        PONTOS_BASE = 100.0
+        B_WEIGHT = 1.0 # Peso do custo
+        
+        pos_atual = (self.x, self.y)
+        tempo_restante = self.get_rtime()
+        
+        pontos_acumulados = 0.0
+        custo_acumulado = 0.0
+        
+        props = getattr(self, 'victim_props', {})
+        
+        for vid in sequencia:
+            dest = self.victim_locs.get(vid)
+            if not dest: continue
+            
+            # Custo de ida
+            dist_ida = self.heuristic(pos_atual, dest)
+            # Custo de volta à base (segurança)
+            dist_base = self.heuristic(dest, self.base_pos_abs)
+            
+            custo_passo = dist_ida * self.COST_DIAG # Aproximação pessimista
+            custo_retorno = dist_base * self.COST_DIAG
+            
+            if custo_acumulado + custo_passo + custo_retorno > tempo_restante:
+                # Se não dá para ir e voltar, para a contagem aqui
+                break
+                
+            custo_acumulado += custo_passo
+            pos_atual = dest
+            
+            # Cálculo dos pontos
+            s, t = props.get(vid, (0.5, 2)) # Padrão se não achar
+            # Prioridade (Triagem): 1=Alta, 2=Media, 3=Baixa, 4=Morta?
+            # Ajuste conforme seu modelo: quanto MENOR o t, MAIOR a prioridade
+            prioridade = max(1, t) 
+            
+            ganho = (PONTOS_BASE * s) / prioridade
+            pontos_acumulados += ganho
+            
+        return (10 * pontos_acumulados) - (B_WEIGHT * custo_acumulado)
     
     def get_next_position(self):
 
@@ -633,9 +601,11 @@ class Rescuer(AbstAgent):
         return 1.5 * min(dx, dy) + 1.0 * abs(dx - dy)
 
     def aestrela(self, start, goal):
-        if not self.map.in_map(start) or not self.map.in_map(goal):
-            return []
-
+        if start not in self.map.map_data or goal not in self.map.map_data:
+            # Se quiser ser muito permissivo e tentar achar caminho mesmo sem saber o goal exato:
+            # return []
+            pass 
+        
         frontier = PriorityQueue()
         frontier.put((0, start))
         came_from = {start: None}
@@ -647,22 +617,29 @@ class Rescuer(AbstAgent):
             if current == goal:
                 break
 
-            cell_data = self.map.get(current)
+            # Pega dados da célula atual
+            # O .get evita erro se a chave não existir
+            cell_data = self.map.map_data.get(current)
             if not cell_data: continue
-            walls = cell_data[2] # Vetor de vizinhos
+            
+            walls = cell_data[2] # Vetor de vizinhos (walls)
 
             # Itera vizinhos (0 a 7)
             for i, (dx, dy) in enumerate(AbstAgent.AC_INCR.values()):
-                # Se for passável (CLEAR, NO_VICTIM ou Vítima identificada)
-                if walls[i] != VS.WALL and walls[i] != VS.END:
+                # Verifica se a direção está bloqueada por parede
+                if walls[i] != VS.WALL:
                     next_node = (current[0] + dx, current[1] + dy)
                     
-                    # Custo do movimento (1.5 diagonal, 1.0 reto)
+                    # Verifica se o vizinho existe no mapa conhecido
+                    if next_node not in self.map.map_data:
+                        continue
+                        
+                    # Custo do movimento
                     move_cost = self.COST_DIAG if dx!=0 and dy!=0 else self.COST_LINE
                     
-                    # Custo do terreno
-                    n_data = self.map.get(next_node)
-                    if n_data: move_cost *= n_data[0]
+                    # Penalidade do terreno (se houver dificuldade de terreno)
+                    n_data = self.map.map_data[next_node]
+                    move_cost *= n_data[0] 
 
                     new_cost = cost_so_far[current] + move_cost
                     if next_node not in cost_so_far or new_cost < cost_so_far[next_node]:
@@ -671,7 +648,8 @@ class Rescuer(AbstAgent):
                         frontier.put((priority, next_node))
                         came_from[next_node] = current
 
-        if goal not in came_from: return []
+        if goal not in came_from: 
+            return []
         
         path = []
         curr = goal
@@ -704,8 +682,18 @@ class Rescuer(AbstAgent):
                     # --- CHECAGEM DE BATERIA ---
                     # 1. Custo para ir até a vítima (estimado ou real via A*)
                     rota_ida = self.aestrela((self.x, self.y), loc)
+
                     if not rota_ida:
-                        print(f"{self.NAME}: Sem caminho para vítima {vid}. Pulando.")
+                        # Debug melhorado
+                        motivo = "Desconhecido"
+                        if (self.x, self.y) not in self.map.map_data:
+                            motivo = f"Estou em area desconhecida {(self.x, self.y)}"
+                        elif loc not in self.map.map_data:
+                            motivo = "Vítima em area desconhecida"
+                        else:
+                            motivo = "Bloqueio/Paredes no caminho"
+                            
+                        print(f"{self.NAME}: Sem caminho para vítima {vid}. Motivo: {motivo}. Pulando.")
                         self.my_victims.pop(0)
                         continue
                     

@@ -101,5 +101,5 @@ if __name__ == "__main__":
     print("\n==============================")
     print("==== INÍCIO SMA | TLIM=8000 ====")
     print("==============================")
-    config_ag_folder = os.path.join(os.getcwd(), "config_ag_1000")
+    config_ag_folder = os.path.join(os.getcwd(), "config_ag_8000")
     main(vict_folder, env_folder, config_ag_folder)
